@@ -1,6 +1,7 @@
 # READ-ONLY — this module must never call any write operation
 """Read-only repo state reader."""
 
+import json
 import os
 import subprocess
 import time
@@ -184,3 +185,45 @@ class PerceptionLayer:
             "current_branch": status_info["current_branch"],
             "observed_at": time.time(),
         }
+
+    def budget_payload(self, state: dict, provider: str = "gemini") -> dict:
+        """Apply token budget rules per architecture.md §3.2 before sending to LLM."""
+        result = dict(state)
+
+        if provider == "gemini":
+            staged_diff = result.get("staged_diff") or ""
+            if len(staged_diff) > 32000:
+                result["staged_diff"] = staged_diff[:32000] + "... [diff truncated at 32000 chars]"
+
+            file_tree = result.get("file_tree") or []
+            result["file_tree"] = list(file_tree)[:500]
+
+        elif provider == "groq":
+            max_chars = 6000 * 4  # approximate 6000 tokens as len(json.dumps(state)) // 4 chars
+
+            # Priority order for truncation: status + current_branch are never
+            # trimmed here (they're small scalars) — trim in this order instead.
+            result["last_commits"] = list(result.get("last_commits") or [])[:5]
+
+            staged_diff = result.get("staged_diff") or ""
+            if len(staged_diff) > 12000:
+                staged_diff = staged_diff[:12000] + "... [diff truncated at 12000 chars]"
+            result["staged_diff"] = staged_diff
+
+            file_tree = result.get("file_tree") or []
+            result["file_tree"] = [p for p in file_tree if p.count("/") <= 1]
+
+            def _size() -> int:
+                return len(json.dumps(result))
+
+            while result["file_tree"] and _size() > max_chars:
+                result["file_tree"].pop()
+
+            while result["staged_diff"] and _size() > max_chars:
+                result["staged_diff"] = result["staged_diff"][:-1000] if len(result["staged_diff"]) > 1000 else ""
+
+            while result["last_commits"] and _size() > max_chars:
+                result["last_commits"].pop()
+
+        result["budget_applied"] = True
+        return result
