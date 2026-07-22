@@ -1,10 +1,151 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>GitHub AI Agent</title>
+<meta charset="UTF-8">
+<title>GitHub AI Agent</title>
+<style>
+  body { font-family: sans-serif; max-width: 700px; margin: 40px auto; padding: 0 16px; }
+  #chat-history { height: 400px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; margin-bottom: 10px; }
+  #chat-history p { margin: 6px 0; }
+  .msg-user { color: #0645ad; }
+  .msg-agent { color: #222; }
+  #input-row { display: flex; gap: 8px; }
+  #message-input { flex: 1; padding: 8px; }
+  #spinner { display: none; margin-top: 8px; }
+  #plan-area { display: none; border: 1px solid #999; padding: 10px; margin-top: 10px; background: #f7f7f7; }
+  #consent-banner { display: none; border: 1px solid #c00; padding: 10px; margin-top: 10px; background: #fee; }
+  code { background: #eee; padding: 1px 4px; border-radius: 3px; }
+  button { cursor: pointer; }
+</style>
 </head>
 <body>
   <h1>GitHub AI Agent</h1>
+
+  <div id="chat-history"></div>
+
+  <div id="input-row">
+    <input type="text" id="message-input" placeholder="Type a message...">
+    <button id="send-btn">Send</button>
+  </div>
+
+  <div id="spinner">Thinking...</div>
+
+  <div id="plan-area">
+    <strong>Here's my plan:</strong>
+    <ol id="plan-steps"></ol>
+    <button id="confirm-btn">Confirm</button>
+    <button id="cancel-btn">Cancel</button>
+  </div>
+
+  <div id="consent-banner">
+    <p>This operation will send your repository file contents to an external AI API. Proceed?</p>
+    <button id="consent-yes">Yes</button>
+    <button id="consent-no">No</button>
+  </div>
+
+<script>
+  const chatHistory = document.getElementById('chat-history');
+  const messageInput = document.getElementById('message-input');
+  const sendBtn = document.getElementById('send-btn');
+  const spinner = document.getElementById('spinner');
+  const planArea = document.getElementById('plan-area');
+  const planSteps = document.getElementById('plan-steps');
+  const confirmBtn = document.getElementById('confirm-btn');
+  const cancelBtn = document.getElementById('cancel-btn');
+  const consentBanner = document.getElementById('consent-banner');
+  const consentYes = document.getElementById('consent-yes');
+  const consentNo = document.getElementById('consent-no');
+
+  let currentPlanId = null;
+
+  function mdToHtml(text) {
+    return text
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/`(.+?)`/g, '<code>$1</code>');
+  }
+
+  function appendMessage(role, text) {
+    const p = document.createElement('p');
+    p.className = role === 'user' ? 'msg-user' : 'msg-agent';
+    p.innerHTML = (role === 'user' ? 'You: ' : 'Agent: ') + mdToHtml(text);
+    chatHistory.appendChild(p);
+    chatHistory.scrollTop = chatHistory.scrollHeight;
+  }
+
+  function showPlan(plan) {
+    currentPlanId = plan.plan_id;
+    planSteps.innerHTML = '';
+    (plan.steps || []).forEach(step => {
+      const li = document.createElement('li');
+      li.textContent = step.description || step.action;
+      planSteps.appendChild(li);
+    });
+    planArea.style.display = 'block';
+  }
+
+  async function sendMessage() {
+    const message = messageInput.value.trim();
+    if (!message) return;
+    appendMessage('user', message);
+    messageInput.value = '';
+    spinner.style.display = 'block';
+
+    try {
+      const res = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message })
+      });
+      const data = await res.json();
+      spinner.style.display = 'none';
+
+      if (data.requires_consent) {
+        consentBanner.style.display = 'block';
+        return;
+      }
+      if (data.reply) appendMessage('agent', data.reply);
+      if (data.plan && data.plan.steps) showPlan(data.plan);
+    } catch (err) {
+      spinner.style.display = 'none';
+      appendMessage('agent', 'Error contacting the agent.');
+    }
+  }
+
+  sendBtn.addEventListener('click', sendMessage);
+  messageInput.addEventListener('keydown', e => { if (e.key === 'Enter') sendMessage(); });
+
+  confirmBtn.addEventListener('click', async () => {
+    const res = await fetch('/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plan_id: currentPlanId })
+    });
+    const data = await res.json();
+    planArea.style.display = 'none';
+    if (data.reply) appendMessage('agent', data.reply);
+  });
+
+  cancelBtn.addEventListener('click', async () => {
+    const res = await fetch('/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plan_id: currentPlanId })
+    });
+    const data = await res.json();
+    planArea.style.display = 'none';
+    if (data.reply) appendMessage('agent', data.reply);
+  });
+
+  consentYes.addEventListener('click', () => {
+    consentBanner.style.display = 'none';
+    sendMessage();
+  });
+
+  consentNo.addEventListener('click', () => {
+    consentBanner.style.display = 'none';
+    appendMessage('agent', 'Operation cancelled.');
+  });
+</script>
 </body>
 </html>
