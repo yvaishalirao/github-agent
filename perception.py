@@ -132,20 +132,54 @@ class PerceptionLayer:
             })
         return commits
 
+    def _read_file_tree(self, repo_path: str, max_depth: int = 2, max_entries: int = 500) -> list:
+        excluded_dirs = {".git", "__pycache__", "node_modules"}
+        entries = []
+
+        for root, dirs, files in os.walk(repo_path):
+            dirs[:] = [d for d in dirs if d not in excluded_dirs]
+
+            rel_root = os.path.relpath(root, repo_path)
+            rel_root = "" if rel_root == "." else rel_root.replace(os.sep, "/")
+
+            for f in files:
+                if f.endswith(".pyc"):
+                    continue
+                rel_path = f"{rel_root}/{f}" if rel_root else f
+                if rel_path.count("/") > max_depth:
+                    continue
+                entries.append(rel_path)
+                if len(entries) >= max_entries:
+                    return entries
+
+        return entries
+
+    def _check_key_files(self, repo_path: str) -> dict:
+        try:
+            names = os.listdir(repo_path)
+        except OSError:
+            return {"readme_exists": False, "gitignore_exists": False}
+
+        readme_exists = any(name.lower() == "readme.md" for name in names)
+        gitignore_exists = ".gitignore" in names
+
+        return {"readme_exists": readme_exists, "gitignore_exists": gitignore_exists}
+
     def read_repo_state(self, repo_path: str) -> dict:
         self._assert_no_writes()
 
         status_info = self._read_status(repo_path)
         branches = self._read_branch_list(repo_path)
+        key_files = self._check_key_files(repo_path)
 
         return {
             "status": status_info["status_summary"],
             "staged_diff": self._read_staged_diff(repo_path),
             "unstaged_diff": self._read_unstaged_diff(repo_path),
             "last_commits": self._read_commits(repo_path),
-            "file_tree": [],
-            "readme_exists": False,
-            "gitignore_exists": False,
+            "file_tree": self._read_file_tree(repo_path),
+            "readme_exists": key_files["readme_exists"],
+            "gitignore_exists": key_files["gitignore_exists"],
             "branches": branches,
             "current_branch": status_info["current_branch"],
             "observed_at": time.time(),
