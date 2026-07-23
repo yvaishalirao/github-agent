@@ -3,6 +3,7 @@
 import json
 import os
 import time
+from uuid import uuid4
 
 import db
 
@@ -71,7 +72,7 @@ def build_prompt(user_intent: str, repo_state: dict, session_id: str) -> str:
 
     session_history = db.get_session_context(session_id, last_n=10)
     history_lines = "\n".join(
-        f"{turn['role']}: {turn['content']}" for turn in session_history
+        f"[turn {turn['turn']}] {turn['role']}: {turn['content']}" for turn in session_history
     )
 
     prompt = (
@@ -157,3 +158,34 @@ def _validate_plan_schema(plan: dict) -> None:
         extra_step_keys = set(step.keys()) - _REQUIRED_STEP_KEYS
         if extra_step_keys:
             raise ValueError(f"step {i} has unexpected key(s): {extra_step_keys}")
+
+
+class AgentBrain:
+    def build_plan(self, user_intent: str, repo_state: dict, session_id: str) -> dict:
+        assert repo_state and len(repo_state) > 0, \
+            "AGENTIC INVARIANT VIOLATED: plan built without repo state"
+        assert "status" in repo_state, \
+            "AGENTIC INVARIANT VIOLATED: repo_state missing required fields"
+
+        prompt = build_prompt(user_intent, repo_state, session_id)
+
+        last_error = None
+        for attempt in range(2):
+            try:
+                raw_response = _call_llm_with_retry(prompt, retries=2)
+                cleaned = _strip_json_fences(raw_response)
+                plan = json.loads(cleaned)
+                _validate_plan_schema(plan)
+
+                plan["plan_id"] = str(uuid4())
+                plan["observed_at"] = repo_state["observed_at"]
+                return plan
+            except (json.JSONDecodeError, ValueError) as e:
+                last_error = e
+                continue
+
+        return {
+            "steps": [],
+            "clarification_needed": "I had trouble understanding that. Could you rephrase?",
+            "error": str(last_error),
+        }

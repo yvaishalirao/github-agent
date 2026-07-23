@@ -41,8 +41,9 @@ def init_db():
 
 def log_step(session_id, action, repo, status, summary):
     token = os.environ.get("GITHUB_TOKEN", "")
-    for value in [action, repo or "", status, summary or ""]:
-        assert token not in str(value), "SECURITY INVARIANT VIOLATED: token in DB write"
+    if token:
+        for value in [action, repo or "", status, summary or ""]:
+            assert token not in str(value), "SECURITY INVARIANT VIOLATED: token in DB write"
 
     from datetime import datetime, timezone
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -62,6 +63,10 @@ def log_step(session_id, action, repo, status, summary):
 
 
 def add_context_turn(session_id, turn, role, content):
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if token:
+        assert token not in content, "SECURITY INVARIANT VIOLATED: token in session context (INV-02)"
+
     from datetime import datetime, timezone
     timestamp = datetime.now(timezone.utc).isoformat()
 

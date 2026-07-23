@@ -12,7 +12,9 @@ from flask import Flask, flash, jsonify, redirect, render_template, request, ses
 
 import config
 import db
+from agent import AgentBrain
 from perception import PerceptionLayer
+from safety import SafetyLayer
 
 load_dotenv()
 
@@ -31,6 +33,11 @@ app.secret_key = config.FLASK_SECRET_KEY
 db.init_db()
 
 perception = PerceptionLayer()
+agent_brain = AgentBrain()
+safety_layer = SafetyLayer()
+
+# In-memory pending-plan store, keyed by plan_id.
+pending_plans = {}
 
 
 # Redacts any string matching a GitHub token pattern from log records —
@@ -123,10 +130,27 @@ def logout():
     return redirect("/login")
 
 
+def _next_turn(session_id: str, role: str, content: str) -> None:
+    turn = session.get("turn", 0)
+    db.add_context_turn(session_id, turn, role, content)
+    session["turn"] = turn + 1
+
+
+def _extract_stated_repos(message: str) -> set:
+    """User-stated repo names — literal tokens from the raw message text only (INV-08)."""
+    return set(re.findall(r"[A-Za-z0-9_.-]+", message))
+
+
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.get_json(silent=True) or {}
+    message = data.get("message", "")
     repo_path = data.get("repo_path", ".")
+
+    session_id = session.get("session_id")
+    if not session_id:
+        session_id = secrets.token_hex(8)
+        session["session_id"] = session_id
 
     try:
         repo_state = perception.read_repo_state(repo_path)
@@ -138,27 +162,77 @@ def chat():
 
     assert repo_state is not None and len(repo_state) > 0
 
-    if repo_state.get("status") == "not a git repository":
-        return jsonify({
-            "reply": f"'{repo_path}' doesn't look like a git repository. Point me at a valid git repo.",
-            "plan": None,
-        })
+    _next_turn(session_id, "user", message)
 
-    return jsonify({
-        "reply": "perception ok",
-        "repo_state_keys": list(repo_state.keys()),
-        "observed_at": repo_state["observed_at"],
-    })
+    plan = agent_brain.build_plan(message, repo_state, session_id)
+
+    clarification_needed = plan.get("clarification_needed")
+    steps = plan.get("steps") or []
+    confirmation = None
+
+    # Never return a plan with steps to the frontend if clarification_needed is set.
+    if clarification_needed:
+        reply, response_type, response_plan = clarification_needed, "clarification", None
+    elif steps:
+        # INV-08: a destructive step's repo must be user-stated, never inferred — checked
+        # before any confirmation token is issued.
+        user_stated_repos = _extract_stated_repos(message)
+        try:
+            for step in steps:
+                safety_layer.assert_repo_is_user_stated(step, user_stated_repos)
+        except AssertionError:
+            reply = "I can't tell which repository that destructive action should target. Please name it explicitly."
+            _next_turn(session_id, "agent", reply)
+            return jsonify({"reply": reply, "plan": None, "type": "clarification"})
+
+        pending_plans[plan["plan_id"]] = plan
+        confirmation = safety_layer.inspect_plan(plan, session_id)
+        reply, response_type, response_plan = "Here is my plan:", "plan", plan
+    else:
+        reply, response_type, response_plan = (
+            "I could not determine what to do. Please rephrase.", "error", None
+        )
+
+    _next_turn(session_id, "agent", reply)
+    response = {"reply": reply, "plan": response_plan, "type": response_type}
+    if confirmation is not None:
+        response["confirmation"] = confirmation
+    return jsonify(response)
 
 
 @app.route("/confirm", methods=["POST"])
 def confirm():
-    return jsonify({"status": "confirm not yet implemented"})
+    data = request.get_json(silent=True) or {}
+    plan_id = data.get("plan_id")
+
+    session_id = session.get("session_id")
+    plan = pending_plans.get(plan_id)
+
+    if plan is None or not session_id:
+        return jsonify({"error": "Confirmation expired or invalid. Please re-confirm."})
+
+    destructive_steps = [s for s in plan.get("steps", []) if s.get("destructive") is True]
+
+    if destructive_steps:
+        first = destructive_steps[0]
+        step_id = first["action"] + "_" + plan_id
+        ok, reason = safety_layer.check_and_consume(session_id, step_id, plan_id)
+        if not ok:
+            return jsonify({"error": "Confirmation expired or invalid. Please re-confirm."})
+
+    # TODO: hand off to executor.execute_plan() once the Execution Engine exists (Session 4 Task 3).
+    del pending_plans[plan_id]
+    return jsonify({"status": "plan confirmed — execution not yet implemented", "plan_id": plan_id})
 
 
 @app.route("/cancel", methods=["POST"])
 def cancel():
-    return jsonify({"status": "cancelled"})
+    data = request.get_json(silent=True) or {}
+    plan_id = data.get("plan_id")
+
+    pending_plans.pop(plan_id, None)
+
+    return jsonify({"status": "plan cancelled"})
 
 
 def _audit_mutation_routes():
