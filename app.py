@@ -12,6 +12,7 @@ from flask import Flask, flash, jsonify, redirect, render_template, request, ses
 
 import config
 import db
+from perception import PerceptionLayer
 
 load_dotenv()
 
@@ -28,6 +29,8 @@ app = Flask(__name__)
 app.secret_key = config.FLASK_SECRET_KEY
 
 db.init_db()
+
+perception = PerceptionLayer()
 
 
 # Redacts any string matching a GitHub token pattern from log records —
@@ -122,7 +125,30 @@ def logout():
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    return jsonify({"reply": "Chat not yet implemented", "plan": None})
+    data = request.get_json(silent=True) or {}
+    repo_path = data.get("repo_path", ".")
+
+    try:
+        repo_state = perception.read_repo_state(repo_path)
+    except Exception:
+        return jsonify({
+            "reply": f"I couldn't read '{repo_path}'. Please check the path exists and try again.",
+            "plan": None,
+        })
+
+    assert repo_state is not None and len(repo_state) > 0
+
+    if repo_state.get("status") == "not a git repository":
+        return jsonify({
+            "reply": f"'{repo_path}' doesn't look like a git repository. Point me at a valid git repo.",
+            "plan": None,
+        })
+
+    return jsonify({
+        "reply": "perception ok",
+        "repo_state_keys": list(repo_state.keys()),
+        "observed_at": repo_state["observed_at"],
+    })
 
 
 @app.route("/confirm", methods=["POST"])
